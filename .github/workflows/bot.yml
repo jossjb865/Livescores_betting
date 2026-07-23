@@ -1,0 +1,32 @@
+name: Motor de Apuestas de Valor
+
+on:
+  schedule:
+    # Se ejecuta en el minuto 0 de cada hora
+    - cron: '0 * * * *'
+  # Permite ejecutar el script manualmente desde la pestaña "Actions"
+  workflow_dispatch:
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar entorno Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Ejecutar motor principal
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          ISPORTS_API_KEY: ${{ secrets.ISPORTS_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python main.py
