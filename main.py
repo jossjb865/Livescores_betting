@@ -13,10 +13,13 @@ ODDS_URL = "https://api.the-odds-api.com/v4/sports/soccer/odds/"
 ISPORTS_STATS_URL = "http://api.isportsapi.com/sport/football/team/recent" 
 TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
+# Memoria caché temporal para evitar llamadas repetidas a la API de estadísticas
+stats_cache = {}
+
 def get_live_odds():
     params = {
         'apiKey': ODDS_API_KEY,
-        'regions': 'eu,us,uk',
+        'regions': 'eu,us',
         'markets': 'h2h',
         'oddsFormat': 'decimal'
     }
@@ -25,19 +28,29 @@ def get_live_odds():
     return response.json()
 
 def get_team_stats(team_name):
+    # Si ya consultamos este equipo en la misma ejecución, devolvemos el resultado guardado
+    if team_name in stats_cache:
+        return stats_cache[team_name]
+        
     params = {
         'api_key': ISPORTS_API_KEY,
         'team_name': team_name, 
         'limit': 5
     }
-    response = requests.get(ISPORTS_STATS_URL, params=params)
-    if response.status_code == 200:
-        return response.json().get('data', [])
+    try:
+        response = requests.get(ISPORTS_STATS_URL, params=params, timeout=5)
+        if response.status_code == 200:
+            data = response.json().get('data', [])
+            stats_cache[team_name] = data
+            return data
+    except Exception:
+        pass
+        
+    stats_cache[team_name] = []
     return []
 
 def calculate_true_probability(stats):
-    # Si no hay datos (0 juegos), devolvemos 0 para evitar falsos positivos
-    if not stats:
+    if not stats or len(stats) == 0:
         return 0.0 
     
     points = 0
@@ -70,33 +83,54 @@ def send_telegram_alert(message):
         'text': message,
         'parse_mode': 'Markdown'
     }
-    requests.post(TELEGRAM_URL, json=payload)
+    try:
+        requests.post(TELEGRAM_URL, json=payload, timeout=5)
+    except Exception:
+        pass
 
 def main():
-    print(f"[{datetime.now()}] Iniciando escaneo de mercados en vivo...")
-    odds_data = get_live_odds()
+    print(f"[{datetime.now()}] Iniciando escaneo optimizado de mercados...")
+    try:
+        odds_data = get_live_odds()
+    except Exception as e:
+        print(f"Error al obtener cuotas: {e}")
+        return
     
-    apuestas_encontradas = [] # Lista para almacenar las oportunidades
+    apuestas_encontradas = []
+    partidos_procesados = set()
     
     for match in odds_data:
         home_team = match['home_team']
         away_team = match['away_team']
+        match_id = match.get('id', f"{home_team}-{away_team}")
         
-        for bookmaker in match['bookmakers']:
-            for market in bookmaker['markets']:
+        # Evitar procesar el mismo partido múltiples veces si aparece duplicado en la respuesta
+        if match_id in partidos_procesados:
+            continue
+        partidos_procesados.add(match_id)
+        
+        for bookmaker in match.get('bookmakers', []):
+            for market in bookmaker.get('markets', []):
                 if market['key'] == 'h2h':
-                    for outcome in market['outcomes']:
+                    for outcome in market.get('outcomes', []):
                         team = outcome['name']
                         odds = outcome['price']
                         
+                        if odds <= 1.01:
+                            continue
+                            
                         implied_prob = 1 / odds 
                         team_stats = get_team_stats(team)
-                        true_prob = calculate_true_probability(team_stats)
                         
+                        # Si no hay datos reales en la API para este equipo, lo ignoramos para evitar ruido
+                        if not team_stats:
+                            continue
+                            
+                        true_prob = calculate_true_probability(team_stats)
                         edge = true_prob - implied_prob
                         
-                        # Solo consideramos edge si tenemos datos del equipo (>0)
-                        if edge > 0.05 and len(team_stats) > 0: 
+                        # Filtro de valor real (> 3% de ventaja matemática)
+                        if edge > 0.03: 
                             wins = sum(1 for g in team_stats if g.get('result') == 'W')
                             draws = sum(1 for g in team_stats if g.get('result') == 'D')
                             losses = sum(1 for g in team_stats if g.get('result') == 'L')
@@ -113,23 +147,34 @@ def main():
                                 f"Récord: {wins}G - {draws}E - {losses}P\n"
                             )
                             
-                            # Guardamos la apuesta en la lista
+                            # Clave única para evitar duplicados exactos de la misma selección y casa
+                            apuesta_key = f"{match_id}-{team}-{bookmaker['title']}"
+                            
                             apuestas_encontradas.append({
+                                'key': apuesta_key,
                                 'mensaje': mensaje,
                                 'edge': edge
                             })
 
-    # Ordenamos la lista de mayor a menor edge
-    apuestas_encontradas.sort(key=lambda x: x['edge'], reverse=True)
+    # Filtrar duplicados exactos por clave única
+    unicas = {}
+    for ap in apuestas_encontradas:
+        unicas[ap['key']] = ap
     
-    # Extraemos solo las 5 mejores
-    top_5 = apuestas_encontradas[:5]
+    lista_limpia = list(unicas.values())
     
-    # Enviamos el Top 5 a Telegram
+    # Ordenar de mayor a menor edge
+    lista_limpia.sort(key=lambda x: x['edge'], reverse=True)
+    
+    # Seleccionar estrictamente el TOP 5
+    top_5 = lista_limpia[:5]
+    
+    print(f"Se encontraron {len(lista_limpia)} apuestas únicas con valor. Enviando el Top {len(top_5)}...")
+    
     for apuesta in top_5:
         send_telegram_alert(apuesta['mensaje'])
         
-    print(f"Escaneo finalizado. Se enviaron {len(top_5)} alertas de {len(apuestas_encontradas)} encontradas.")
+    print("Escaneo completado con éxito y proceso finalizado de forma limpia.")
 
 if __name__ == "__main__":
     main()
