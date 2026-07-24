@@ -14,10 +14,9 @@ ISPORTS_STATS_URL = "http://api.isportsapi.com/sport/football/team/recent"
 TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
 def get_live_odds():
-    """Obtiene las cuotas en vivo de las casas de apuestas."""
     params = {
         'apiKey': ODDS_API_KEY,
-        'regions': 'eu,us',
+        'regions': 'eu,us,uk',
         'markets': 'h2h',
         'oddsFormat': 'decimal'
     }
@@ -26,7 +25,6 @@ def get_live_odds():
     return response.json()
 
 def get_team_stats(team_name):
-    """Obtiene los últimos 5 partidos y el rendimiento real desde iSportsAPI."""
     params = {
         'api_key': ISPORTS_API_KEY,
         'team_name': team_name, 
@@ -34,21 +32,19 @@ def get_team_stats(team_name):
     }
     response = requests.get(ISPORTS_STATS_URL, params=params)
     if response.status_code == 200:
-        # Nota: Ajusta las llaves del JSON según la liga específica consultada en iSportsAPI
         return response.json().get('data', [])
     return []
 
 def calculate_true_probability(stats):
-    """Calcula la probabilidad real de victoria basándose en la trayectoria reciente."""
+    # Si no hay datos (0 juegos), devolvemos 0 para evitar falsos positivos
     if not stats:
-        return 0.33 # Probabilidad base neutra si no hay datos disponibles
+        return 0.0 
     
     points = 0
     total_games = len(stats)
     goal_difference = 0
     
     for game in stats:
-        # Ponderación de resultados (Win/Draw/Loss)
         if game.get('result') == 'W':
             points += 3
         elif game.get('result') == 'D':
@@ -63,15 +59,12 @@ def calculate_true_probability(stats):
             goal_difference += (away_score - home_score)
         
     win_rate = points / (total_games * 3)
-    # Modificador de rendimiento basado en el dominio de goles recientes
     performance_modifier = goal_difference * 0.02
     
-    # La probabilidad real debe mantenerse dentro de límites lógicos
     true_prob = min(max(win_rate + performance_modifier, 0.05), 0.95)
     return true_prob
 
 def send_telegram_alert(message):
-    """Despacha el mensaje estructurado al bot de Telegram."""
     payload = {
         'chat_id': TELEGRAM_CHAT_ID,
         'text': message,
@@ -82,6 +75,8 @@ def send_telegram_alert(message):
 def main():
     print(f"[{datetime.now()}] Iniciando escaneo de mercados en vivo...")
     odds_data = get_live_odds()
+    
+    apuestas_encontradas = [] # Lista para almacenar las oportunidades
     
     for match in odds_data:
         home_team = match['home_team']
@@ -94,18 +89,14 @@ def main():
                         team = outcome['name']
                         odds = outcome['price']
                         
-                        # Probabilidad según la casa de apuestas
                         implied_prob = 1 / odds 
-                        
-                        # Obtención de trayectoria y cálculo matemático
                         team_stats = get_team_stats(team)
                         true_prob = calculate_true_probability(team_stats)
                         
-                        # Edge (Valor): Diferencia matemática a tu favor
                         edge = true_prob - implied_prob
                         
-                        # Umbral configurado al 5% de ventaja
-                        if edge > 0.05: 
+                        # Solo consideramos edge si tenemos datos del equipo (>0)
+                        if edge > 0.05 and len(team_stats) > 0: 
                             wins = sum(1 for g in team_stats if g.get('result') == 'W')
                             draws = sum(1 for g in team_stats if g.get('result') == 'D')
                             losses = sum(1 for g in team_stats if g.get('result') == 'L')
@@ -121,8 +112,24 @@ def main():
                                 f"📌 *Trayectoria (Últimos {len(team_stats)} juegos):*\n"
                                 f"Récord: {wins}G - {draws}E - {losses}P\n"
                             )
-                            send_telegram_alert(mensaje)
-                            print(f"Alerta despachada: {team} @ {odds}")
+                            
+                            # Guardamos la apuesta en la lista
+                            apuestas_encontradas.append({
+                                'mensaje': mensaje,
+                                'edge': edge
+                            })
+
+    # Ordenamos la lista de mayor a menor edge
+    apuestas_encontradas.sort(key=lambda x: x['edge'], reverse=True)
+    
+    # Extraemos solo las 5 mejores
+    top_5 = apuestas_encontradas[:5]
+    
+    # Enviamos el Top 5 a Telegram
+    for apuesta in top_5:
+        send_telegram_alert(apuesta['mensaje'])
+        
+    print(f"Escaneo finalizado. Se enviaron {len(top_5)} alertas de {len(apuestas_encontradas)} encontradas.")
 
 if __name__ == "__main__":
     main()
